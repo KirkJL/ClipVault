@@ -272,7 +272,7 @@ def drive_existing_file(service, clip_id):
         q=query,
         spaces="drive",
         fields="nextPageToken, files(id,name,webViewLink)",
-        page_size=10
+        pageSize=10
     ).execute()
 
     files = response.get("files", [])
