@@ -1,202 +1,183 @@
 
-name: ClipVault - Download to Google Drive
+name: ClipVault Download
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Download mode"
+        description: Download mode
         required: true
-        type: choice
         default: single
+        type: choice
         options:
           - single
           - batch
 
       video_url:
-        description: "YouTube video URL"
+        description: YouTube video URL
         required: false
-        type: string
-
-      manifest:
-        description: "Manifest file path (batch mode)"
-        required: false
-        default: "halo-60.json"
+        default: ""
         type: string
 
       quality:
-        description: "Maximum video resolution"
+        description: Maximum video quality
         required: true
-        type: choice
         default: "1080"
+        type: choice
         options:
           - "720"
           - "1080"
           - "1440"
           - "2160"
 
+      manifest:
+        description: Batch manifest filename
+        required: false
+        default: halo-60.json
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clipvault-download
+  cancel-in-progress: false
+
 jobs:
   download:
-    name: Download and upload videos
+    name: Download and upload to Drive
     runs-on: ubuntu-latest
-
     timeout-minutes: 120
 
-    permissions:
-      contents: read
-
-    concurrency:
-      group: clipvault-drive-upload
-      cancel-in-progress: false
-
     env:
-      PYTHONUNBUFFERED: "1"
-
       DOWNLOAD_MODE: ${{ inputs.mode }}
       VIDEO_URL: ${{ inputs.video_url }}
-      MANIFEST_PATH: ${{ inputs.manifest }}
       VIDEO_QUALITY: ${{ inputs.quality }}
+      MANIFEST_PATH: ${{ inputs.manifest }}
 
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
 
+      CLIPVAULT_POT_PROVIDER_URL: http://127.0.0.1:4416
+
     steps:
-      # 1. Get repository files
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Configure Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements.txt
 
-      # 3. Install FFmpeg
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      # 4. Install Deno for yt-dlp
-      - name: Install Deno
+      - name: Set up Deno
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
-      # 5. Verify JavaScript runtime
-      - name: Verify JavaScript runtime
-        run: |
-          deno --version
-
-      # 6. Install yt-dlp, BgUtils plugin and Google APIs
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # 7. Verify yt-dlp and plugin discovery
-      - name: Verify yt-dlp
+      - name: Start BgUtils PO-token provider
         run: |
-          python -m yt_dlp --version
-          python -m yt_dlp --verbose --list-extractors \
-            > /tmp/clipvault-extractors.txt 2>&1
-
-          if grep -q "bgutil" /tmp/clipvault-extractors.txt; then
-            echo "BgUtils plugin detected."
-          else
-            echo "Checking plugin through Python..."
-            python -m pip show bgutil-ytdlp-pot-provider
-          fi
-
-      # 8. Start the local BgUtils token generator
-      - name: Start PO-token provider
-        shell: bash
-        run: |
-          docker run \
-            --name clipvault-bgutil \
-            --detach \
-            --init \
-            --publish 127.0.0.1:4416:4416 \
+          docker run -d \
+            --name clipvault-pot-provider \
+            --restart no \
+            -p 127.0.0.1:4416:4416 \
             brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno
 
-      # 9. Wait for the token provider
-      - name: Verify PO-token provider
-        shell: bash
+      - name: Wait for PO-token provider
         run: |
-          echo "Waiting for BgUtils provider..."
+          python - <<'PY'
+          import time
+          import urllib.request
 
-          READY=0
+          url = "http://127.0.0.1:4416"
 
-          for attempt in {1..30}; do
-            if ! docker inspect \
-              --format '{{.State.Running}}' \
-              clipvault-bgutil 2>/dev/null \
-              | grep -qx true; then
-              echo "Provider container stopped."
-              docker logs clipvault-bgutil
-              exit 1
-            fi
+          for attempt in range(30):
+              try:
+                  urllib.request.urlopen(
+                      url,
+                      timeout=3
+                  )
+                  print("Provider is responding")
+                  break
+              except Exception:
+                  if attempt == 29:
+                      raise RuntimeError(
+                          "PO-token provider did not start"
+                      )
+                  time.sleep(2)
+          PY
 
-            if curl \
-              --silent \
-              --output /dev/null \
-              --max-time 2 \
-              http://127.0.0.1:4416; then
-              READY=1
-              break
-            fi
+      # The secret contains the original Netscape cookies.txt.
+      # No Base64 conversion is required.
+      #
+      # Keep the secret out of shell command arguments
+      # and never print its contents.
 
-            sleep 2
-          done
-
-          if [[ "$READY" != "1" ]]; then
-            echo "::error::BgUtils provider did not respond."
-            docker logs clipvault-bgutil
-            exit 1
-          fi
-
-          echo "BgUtils provider is responding."
-
-      # 10. Validate Google Drive configuration
-      - name: Validate configuration
-        shell: bash
+      - name: Prepare YouTube cookies
+        env:
+          YOUTUBE_COOKIES_SECRET: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
-          if [[ -z "$GOOGLE_CLIENT_ID" ||
-                -z "$GOOGLE_CLIENT_SECRET" ||
-                -z "$GOOGLE_REFRESH_TOKEN" ||
-                -z "$GOOGLE_DRIVE_FOLDER_ID" ]]; then
-            echo "::error::Missing Google OAuth secrets."
-            exit 1
-          fi
+          python - <<'PY'
+          import os
+          import tempfile
+          from pathlib import Path
 
-          if [[ "$DOWNLOAD_MODE" == "single" &&
-                -z "$VIDEO_URL" ]]; then
-            echo "::error::Single mode requires a video URL."
-            exit 1
-          fi
+          cookies = os.environ.get(
+              "YOUTUBE_COOKIES_SECRET", ""
+          )
 
-          if [[ "$DOWNLOAD_MODE" == "batch" &&
-                ! -f "$MANIFEST_PATH" ]]; then
-            echo "::error::Manifest file not found."
-            exit 1
-          fi
+          if not cookies.strip():
+              print(
+                  "No YouTube cookie secret configured. "
+                  "Continuing without cookies."
+              )
+          else:
+              cookie_path = (
+                  Path(tempfile.gettempdir())
+                  / "clipvault-youtube-cookies.txt"
+              )
 
-          if [[ "$DOWNLOAD_MODE" != "single" &&
-                "$DOWNLOAD_MODE" != "batch" ]]; then
-            echo "::error::Invalid download mode."
-            exit 1
-          fi
+              # Preserve Netscape cookie formatting.
+              cookies = cookies.replace(
+                  "\r\n", "\n"
+              ).replace("\r", "\n")
 
-      # 11. Download and upload to Google Drive
-      - name: Download and upload
+              cookie_path.write_text(
+                  cookies,
+                  encoding="utf-8"
+              )
+
+              cookie_path.chmod(0o600)
+
+              with open(
+                  os.environ["GITHUB_ENV"],
+                  "a",
+                  encoding="utf-8"
+              ) as env_file:
+                  env_file.write(
+                      f"YOUTUBE_COOKIE_FILE={cookie_path}\n"
+                  )
+
+              print(
+                  "YouTube cookie file prepared securely."
+              )
+          PY
+
+      - name: Download and upload videos
         run: |
           python downloader.py
 
-      # 12. Save execution reports
       - name: Upload execution report
         if: always()
         uses: actions/upload-artifact@v4
@@ -206,15 +187,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 13. Show provider logs on failure
-      - name: Diagnose PO-token provider
-        if: failure()
-        run: |
-          docker logs --tail 100 clipvault-bgutil || true
-
-      # 14. Stop provider and remove temporary files
-      - name: Cleanup
+      - name: Clean up authentication files
         if: always()
         run: |
-          docker rm -f clipvault-bgutil || true
-          rm -rf downloads/
+          if [ -n "${YOUTUBE_COOKIE_FILE:-}" ]; then
+            rm -f -- "$YOUTUBE_COOKIE_FILE"
+          fi
+
+          docker rm -f \
+            clipvault-pot-provider \
+            2>/dev/null || true
