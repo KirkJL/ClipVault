@@ -8,15 +8,18 @@
 
   <meta name="theme-color" content="#0a1020">
 
-  <title>ClipVault — Send to Drive</title>
+  <title>ClipVault | Send to Google Drive</title>
 
   <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
 </head>
 
 <body>
-  <main class="container">
 
-    <header class="header">
+  <main class="shell">
+
+    <!-- BRAND HEADER -->
+    <header class="masthead">
       <div>
         <span class="eyebrow">
           STATIC-FIRST • GITHUB POWERED
@@ -24,25 +27,25 @@
 
         <h1>CLIP<span>VAULT</span></h1>
 
-        <p>
-          Your videos. Your cloud. No clutter.
-        </p>
+        <p>Your video. Your cloud. One click.</p>
       </div>
 
-      <div class="pill">
+      <span class="pill">
         GITHUB → GOOGLE DRIVE
-      </div>
+      </span>
     </header>
 
-    <section class="panel download-panel">
+    <!-- VIDEO SUBMISSION -->
+    <section class="panel">
 
-      <div class="panel-heading">
-        <span class="section-label">VIDEO TRANSFER</span>
+      <div class="panel-head">
+        <span class="eyebrow">VIDEO TRANSFER</span>
+
         <h2>Send a video to Drive</h2>
 
         <p>
-          Paste a YouTube video URL below.
-          GitHub handles the download and upload.
+          Paste a YouTube video URL, choose your
+          quality and send it directly to Google Drive.
         </p>
       </div>
 
@@ -53,8 +56,8 @@
         </label>
 
         <input
-          type="url"
           id="video-url"
+          type="url"
           placeholder="https://www.youtube.com/watch?v=..."
           autocomplete="off"
           spellcheck="false"
@@ -62,69 +65,154 @@
         >
 
         <label for="quality">
-          DOWNLOAD QUALITY
+          VIDEO QUALITY
         </label>
 
         <select id="quality">
-          <option value="720">720p</option>
-          <option value="1080" selected>1080p — Full HD</option>
+          <option value="720">720p — HD</option>
+          <option value="1080" selected>
+            1080p — Full HD
+          </option>
           <option value="1440">1440p — QHD</option>
           <option value="2160">2160p — 4K</option>
         </select>
 
-        <button type="submit" id="submit-button">
-          <span class="button-icon">↗</span>
-          SEND TO GOOGLE DRIVE
+        <button id="submit-button" type="submit">
+          ↗ SEND TO GOOGLE DRIVE
         </button>
 
       </form>
 
-      <p id="status-message"
-         class="status-message"
-         role="status"
-         aria-live="polite"></p>
+      <!-- SUBMISSION FEEDBACK -->
+      <p
+        id="status-message"
+        class="status"
+        role="status"
+        aria-live="polite"
+      ></p>
 
-      <div class="workflow-info">
-        <span class="workflow-dot"></span>
-        <span>
-          Powered by GitHub Actions
+      <!-- GITHUB WORKFLOW STATUS -->
+      <div
+        id="job-details"
+        class="job-details"
+        hidden
+      >
+
+        <span id="job-state">
+          Waiting for GitHub...
         </span>
+
+        <a
+          id="job-link"
+          href="https://github.com/KirkJL/ClipVault/actions"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View GitHub Actions ↗
+        </a>
+
+      </div>
+
+      <div class="footline">
+        <span class="dot"></span>
+        GitHub Actions handles downloads and uploads
       </div>
 
     </section>
 
-    <section class="info-grid">
+    <!-- HOW IT WORKS -->
+    <section class="steps">
 
-      <article class="info-card">
-        <div class="info-icon">01</div>
-        <h3>Paste</h3>
-        <p>Copy a direct YouTube video URL.</p>
+      <article>
+        <strong>01 / PASTE</strong>
+        <p>Enter a direct YouTube video URL.</p>
       </article>
 
-      <article class="info-card">
-        <div class="info-icon">02</div>
-        <h3>Run</h3>
-        <p>Confirm the download in GitHub Actions.</p>
+      <article>
+        <strong>02 / SEND</strong>
+        <p>Trigger the GitHub workflow automatically.</p>
       </article>
 
-      <article class="info-card">
-        <div class="info-icon">03</div>
-        <h3>Store</h3>
-        <p>GitHub uploads the MP4 to Google Drive.</p>
+      <article>
+        <strong>03 / STORE</strong>
+        <p>Find your video in Google Drive.</p>
       </article>
 
     </section>
 
+    <!-- GITHUB AUTHENTICATION -->
+    <details class="panel settings">
+
+      <summary>
+        GitHub connection settings
+
+        <span id="connection-indicator">
+          Not connected
+        </span>
+      </summary>
+
+      <p>
+        Connect your GitHub account using a
+        fine-grained personal access token.
+        Grant Actions read and write permission
+        for the ClipVault repository only.
+      </p>
+
+      <label for="github-token">
+        GITHUB ACCESS TOKEN
+      </label>
+
+      <input
+        id="github-token"
+        type="password"
+        placeholder="github_pat_..."
+        autocomplete="off"
+        spellcheck="false"
+      >
+
+      <label class="checkbox">
+        <input
+          id="remember-token"
+          type="checkbox"
+        >
+        Remember token on this device
+      </label>
+
+      <div class="settings-actions">
+
+        <button id="save-token" type="button">
+          Connect GitHub
+        </button>
+
+        <button
+          id="clear-token"
+          type="button"
+          class="secondary"
+        >
+          Forget token
+        </button>
+
+      </div>
+
+      <p
+        id="token-status"
+        class="status"
+        role="status"
+        aria-live="polite"
+      ></p>
+
+    </details>
+
     <footer>
       CLIPVAULT • GITHUB PAGES
+
       <p>
-        Download only videos you own or are
-        authorised to retrieve.
+        Only download videos you own or have
+        permission to retrieve.
       </p>
     </footer>
 
   </main>
 
-  <script src="app.js"></script>
 </body>
 </html>
