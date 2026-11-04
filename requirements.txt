@@ -1,0 +1,7 @@
+
+yt-dlp>=2025.10.14,<2027.0.0
+google-api-python-client>=2.150.0,<3.0.0
+google-auth>=2.35.0,<3.0.0
+google-auth-httplib2>=0.2.0,<1.0.0
+google-auth-oauthlib>=1.2.0,<2.0.0
+requests>=2.32.0,<3.0.0
