@@ -1,34 +1,30 @@
 
 #!/usr/bin/env python3
 """
-ClipVault - GitHub Actions to Google Drive
+ClipVault — YouTube to Google Drive
 
-Features:
-- Single-video and JSON-manifest batch processing
-- YouTube URL validation
-- MP4 downloads using yt-dlp and FFmpeg
-- BgUtils HTTP PO-token provider integration
-- OAuth refresh-token authentication
-- Resumable Google Drive uploads
-- Duplicate detection using stable clip IDs
-- Safe filenames and size limits
-- Per-video reporting
+GitHub Actions downloader with:
+- Single and batch modes
+- yt-dlp mweb client
+- BgUtils HTTP PO-token provider
+- Google OAuth refresh-token authentication
+- Drive duplicate detection
+- Resumable uploads
+- JSON execution reports
 - Temporary-file cleanup
-
-Only download content you have permission to retrieve.
 """
 
 import json
 import os
 import re
-import sys
-import time
-import tempfile
 import shutil
+import sys
+import tempfile
+import time
 
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
@@ -40,38 +36,42 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 
-# --------------------------------------------------
+# ==================================================
 # Configuration
-# --------------------------------------------------
+# ==================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 REPORT_DIR = BASE_DIR / "reports"
 
-MODE = os.getenv("DOWNLOAD_MODE", "single").strip().lower()
-VIDEO_URL = os.getenv("VIDEO_URL", "").strip()
+MODE = os.getenv(
+    "DOWNLOAD_MODE", "single"
+).strip().lower()
+
+VIDEO_URL = os.getenv(
+    "VIDEO_URL", ""
+).strip()
+
 MANIFEST_PATH = os.getenv(
     "MANIFEST_PATH", "halo-60.json"
 ).strip()
 
-QUALITY = int(os.getenv("VIDEO_QUALITY", "1080"))
+QUALITY = int(
+    os.getenv("VIDEO_QUALITY", "1080")
+)
 
 CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
 DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
 
-# BgUtils service started by download.yml.
 POT_PROVIDER_URL = os.getenv(
     "CLIPVAULT_POT_PROVIDER_URL",
     "http://127.0.0.1:4416"
 ).rstrip("/")
 
-YOUTUBE_PLAYER_CLIENTS = [
-    "mweb",
-    "tv",
-    "web_safari"
-]
+# Use one YouTube client for this controlled test.
+YOUTUBE_PLAYER_CLIENTS = ["mweb"]
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file"
@@ -81,18 +81,27 @@ MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024
 MAX_BATCH_ITEMS = 100
 MAX_RETRIES = 3
 
-ALLOWED_QUALITIES = {720, 1080, 1440, 2160}
+ALLOWED_QUALITIES = {
+    720, 1080, 1440, 2160
+}
 
-DOWNLOAD_DIR.mkdir(exist_ok=True)
-REPORT_DIR.mkdir(exist_ok=True)
+DOWNLOAD_DIR.mkdir(
+    parents=True, exist_ok=True
+)
+
+REPORT_DIR.mkdir(
+    parents=True, exist_ok=True
+)
 
 
-# --------------------------------------------------
+# ==================================================
 # Helpers
-# --------------------------------------------------
+# ==================================================
 
 def timestamp():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
 
 def safe_filename(value):
@@ -101,22 +110,24 @@ def safe_filename(value):
         "_",
         str(value)
     )
-    value = re.sub(r"\s+", " ", value).strip(" .")
+
+    value = re.sub(
+        r"\s+", " ", value
+    ).strip(" .")
+
     return value[:120] or "untitled"
 
 
 def video_id_from_url(url):
-    """
-    Only accept recognised YouTube video URLs.
-    Search-result URLs are deliberately rejected.
-    """
     try:
         parsed = urlparse(url)
 
         if parsed.scheme != "https":
             return None
 
-        host = (parsed.hostname or "").lower()
+        host = (
+            parsed.hostname or ""
+        ).lower()
 
         if host in {
             "youtube.com",
@@ -127,13 +138,20 @@ def video_id_from_url(url):
                 values = parse_qs(
                     parsed.query
                 ).get("v", [])
-                candidate = values[0] if values else ""
 
-            elif parsed.path.startswith("/shorts/"):
-                candidate = parsed.path.split("/")[2]
+                candidate = (
+                    values[0] if values else ""
+                )
 
-            elif parsed.path.startswith("/live/"):
-                candidate = parsed.path.split("/")[2]
+            elif parsed.path.startswith(
+                ("/shorts/", "/live/")
+            ):
+                parts = parsed.path.split("/")
+                candidate = (
+                    parts[2]
+                    if len(parts) > 2
+                    else ""
+                )
 
             else:
                 return None
@@ -172,18 +190,22 @@ def stable_clip_id(url):
     video_id = video_id_from_url(url)
 
     if not video_id:
-        raise ValueError("Invalid YouTube video URL")
+        raise ValueError(
+            "Invalid YouTube video URL"
+        )
 
     return "youtube-" + video_id
 
 
-# --------------------------------------------------
-# Load single or batch jobs
-# --------------------------------------------------
+# ==================================================
+# Load jobs
+# ==================================================
 
 def load_items():
     if MODE == "single":
-        canonical = canonical_video_url(VIDEO_URL)
+        canonical = canonical_video_url(
+            VIDEO_URL
+        )
 
         if not canonical:
             raise ValueError(
@@ -198,27 +220,36 @@ def load_items():
         }]
 
     if MODE != "batch":
-        raise ValueError("Mode must be single or batch")
+        raise ValueError(
+            "Mode must be single or batch"
+        )
 
-    manifest = (BASE_DIR / MANIFEST_PATH).resolve()
+    manifest = (
+        BASE_DIR / MANIFEST_PATH
+    ).resolve()
 
     if not manifest.is_relative_to(BASE_DIR):
         raise ValueError(
-            "Manifest must be inside the repository"
+            "Manifest must be inside repository"
         )
 
     if manifest.suffix.lower() != ".json":
-        raise ValueError("Manifest must be a JSON file")
+        raise ValueError(
+            "Manifest must be JSON"
+        )
 
     if not manifest.is_file():
-        raise FileNotFoundError("Manifest not found")
+        raise FileNotFoundError(
+            "Manifest not found"
+        )
 
     if manifest.stat().st_size > 5 * 1024 * 1024:
-        raise ValueError("Manifest exceeds 5 MB")
+        raise ValueError(
+            "Manifest exceeds 5 MB"
+        )
 
     with manifest.open(
-        "r",
-        encoding="utf-8"
+        "r", encoding="utf-8"
     ) as handle:
         data = json.load(handle)
 
@@ -230,17 +261,19 @@ def load_items():
 
     if not isinstance(data, list):
         raise ValueError(
-            "Manifest must contain a list of clips"
+            "Manifest must contain a list"
         )
 
     if len(data) > MAX_BATCH_ITEMS:
         raise ValueError(
-            "Manifest exceeds the batch limit"
+            "Manifest exceeds batch limit"
         )
 
     items = []
 
-    for index, item in enumerate(data, start=1):
+    for index, item in enumerate(
+        data, start=1
+    ):
         if not isinstance(item, dict):
             continue
 
@@ -255,44 +288,40 @@ def load_items():
             str(candidate)
         )
 
+        name = str(
+            item.get(
+                "name",
+                item.get(
+                    "title",
+                    f"Clip {index}"
+                )
+            )
+        )
+
         if not canonical:
             items.append({
                 "id": str(
-                    item.get("id", f"clip-{index}")
-                ),
-                "name": str(
                     item.get(
-                        "name",
-                        item.get(
-                            "title",
-                            f"Clip {index}"
-                        )
+                        "id", f"clip-{index}"
                     )
                 ),
+                "name": name,
                 "url": None
             })
             continue
 
         items.append({
             "id": stable_clip_id(canonical),
-            "name": str(
-                item.get(
-                    "name",
-                    item.get(
-                        "title",
-                        f"Clip {index}"
-                    )
-                )
-            ),
+            "name": name,
             "url": canonical
         })
 
     return items
 
 
-# --------------------------------------------------
-# Google Drive OAuth
-# --------------------------------------------------
+# ==================================================
+# Google Drive authentication
+# ==================================================
 
 def create_drive_service():
     required = {
@@ -303,8 +332,8 @@ def create_drive_service():
     }
 
     missing = [
-        name
-        for name, value in required.items()
+        key
+        for key, value in required.items()
         if not value
     ]
 
@@ -317,7 +346,9 @@ def create_drive_service():
     credentials = Credentials(
         token=None,
         refresh_token=REFRESH_TOKEN,
-        token_uri="https://oauth2.googleapis.com/token",
+        token_uri=(
+            "https://oauth2.googleapis.com/token"
+        ),
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         scopes=SCOPES
@@ -333,11 +364,11 @@ def create_drive_service():
     )
 
 
+# ==================================================
+# Duplicate detection
+# ==================================================
+
 def drive_existing_file(service, clip_id):
-    """
-    Search only inside the configured Drive folder.
-    Duplicate detection uses appProperties.
-    """
     escaped_id = clip_id.replace(
         "\\", "\\\\"
     ).replace("'", "\\'")
@@ -365,24 +396,18 @@ def drive_existing_file(service, clip_id):
     ).execute()
 
     files = response.get("files", [])
+
     return files[0] if files else None
 
 
-# --------------------------------------------------
-# BgUtils provider diagnostics
-# --------------------------------------------------
+# ==================================================
+# PO-token provider diagnostics
+# ==================================================
 
 def check_pot_provider():
-    """
-    Verify that the local HTTP provider is reachable.
-
-    This is not proof that YouTube will accept a
-    generated token. Actual token requests appear
-    in yt-dlp's verbose output.
-    """
     print(
-        f"Checking PO-token provider: "
-        f"{POT_PROVIDER_URL}"
+        "Checking BgUtils provider at "
+        + POT_PROVIDER_URL
     )
 
     try:
@@ -392,22 +417,20 @@ def check_pot_provider():
         )
 
         print(
-            "PO-token provider HTTP status: "
-            f"{response.status_code}"
+            "Provider HTTP status: "
+            + str(response.status_code)
         )
-
-        return True
 
     except requests.RequestException as error:
         raise RuntimeError(
-            "BgUtils HTTP provider is unreachable: "
-            f"{error}"
+            "BgUtils provider is unreachable: "
+            + str(error)
         ) from error
 
 
-# --------------------------------------------------
-# Video download
-# --------------------------------------------------
+# ==================================================
+# yt-dlp download
+# ==================================================
 
 def download_video(item):
     url = item["url"]
@@ -423,20 +446,20 @@ def download_video(item):
         folder / "%(id)s.%(ext)s"
     )
 
-    # These arguments are passed directly to yt-dlp.
+    # yt-dlp Python API extractor arguments
     #
     # youtube:
-    #   Try alternative player clients that may
-    #   reach the PO-token request stage.
+    #   Use only mweb for this test.
     #
     # youtubepot-bgutilhttp:
-    #   Explicitly configure the local token provider.
+    #   Use the existing local HTTP provider.
     #
-    # The BgUtils plugin must be installed separately
-    # through requirements.txt.
+    # Do not manually supply a PO token.
+    # The plugin requests one as needed.
+
     extractor_args = {
         "youtube": {
-            "player_client": YOUTUBE_PLAYER_CLIENTS
+            "player_client": ["mweb"]
         },
         "youtubepot-bgutilhttp": {
             "base_url": [POT_PROVIDER_URL]
@@ -453,6 +476,7 @@ def download_video(item):
 
         "outtmpl": output_template,
         "merge_output_format": "mp4",
+
         "noplaylist": True,
         "ignoreerrors": False,
 
@@ -462,11 +486,8 @@ def download_video(item):
 
         "quiet": False,
         "no_warnings": False,
-
-        # Required for detailed provider diagnostics.
         "verbose": True,
 
-        # Use installed BgUtils PO-token provider.
         "extractor_args": extractor_args,
 
         "restrictfilenames": True,
@@ -480,15 +501,18 @@ def download_video(item):
     }
 
     try:
-        print(
-            "YouTube clients: "
-            + ", ".join(YOUTUBE_PLAYER_CLIENTS)
-        )
+        print("=" * 50)
+        print("CLIPVAULT YOUTUBE CONFIGURATION")
+        print("=" * 50)
 
+        print("Player client: mweb")
         print(
             "PO-token provider: "
             + POT_PROVIDER_URL
         )
+        print("Verbose diagnostics: enabled")
+
+        print("=" * 50)
 
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(
@@ -501,7 +525,9 @@ def download_video(item):
                 "No video information returned"
             )
 
-        files = list(folder.glob("*.mp4"))
+        files = list(
+            folder.glob("*.mp4")
+        )
 
         if not files:
             raise RuntimeError(
@@ -519,7 +545,8 @@ def download_video(item):
             )
 
         title = safe_filename(
-            info.get("title") or item["name"]
+            info.get("title")
+            or item["name"]
         )
 
         return folder, video_file, title
@@ -532,9 +559,9 @@ def download_video(item):
         raise
 
 
-# --------------------------------------------------
+# ==================================================
 # Google Drive upload
-# --------------------------------------------------
+# ==================================================
 
 def upload_to_drive(
     service,
@@ -545,8 +572,7 @@ def upload_to_drive(
     clip_id = item["id"]
 
     existing = drive_existing_file(
-        service,
-        clip_id
+        service, clip_id
     )
 
     if existing:
@@ -562,7 +588,9 @@ def upload_to_drive(
             )
         }
 
-    filename = safe_filename(title) + ".mp4"
+    filename = (
+        safe_filename(title) + ".mp4"
+    )
 
     metadata = {
         "name": filename,
@@ -600,6 +628,7 @@ def upload_to_drive(
                 percentage = int(
                     progress.progress() * 100
                 )
+
                 print(
                     f"Upload progress: {percentage}%"
                 )
@@ -637,9 +666,9 @@ def upload_to_drive(
     }
 
 
-# --------------------------------------------------
-# Reporting
-# --------------------------------------------------
+# ==================================================
+# Reports
+# ==================================================
 
 def save_report(results):
     report = {
@@ -671,7 +700,9 @@ def save_report(results):
         "items": results
     }
 
-    path = REPORT_DIR / "clipvault-report.json"
+    path = (
+        REPORT_DIR / "clipvault-report.json"
+    )
 
     with path.open(
         "w",
@@ -688,22 +719,30 @@ def save_report(results):
     print("CLIPVAULT REPORT")
     print("=" * 50)
 
-    print(f"Total:          {report['total']}")
-    print(f"Uploaded:       {report['uploaded']}")
+    print(
+        f"Total:          {report['total']}"
+    )
+    print(
+        f"Uploaded:       {report['uploaded']}"
+    )
     print(
         f"Already exists: {report['already_exists']}"
     )
-    print(f"Skipped:        {report['skipped']}")
-    print(f"Failed:         {report['failed']}")
+    print(
+        f"Skipped:        {report['skipped']}"
+    )
+    print(
+        f"Failed:         {report['failed']}"
+    )
 
     print("=" * 50)
 
     return report
 
 
-# --------------------------------------------------
+# ==================================================
 # Main
-# --------------------------------------------------
+# ==================================================
 
 def main():
     if QUALITY not in ALLOWED_QUALITIES:
@@ -714,95 +753,105 @@ def main():
     items = load_items()
 
     if not items:
-        raise ValueError("No clips found")
+        raise ValueError(
+            "No clips found"
+        )
 
     service = create_drive_service()
 
-    # Verify the service started by GitHub Actions.
     check_pot_provider()
 
     results = []
 
-    try:
-        for index, item in enumerate(
-            items,
-            start=1
-        ):
-            print(
-                f"\n[{index}/{len(items)}] "
-                f"{safe_filename(item['name'])}"
+    for index, item in enumerate(
+        items,
+        start=1
+    ):
+        print(
+            f"\n[{index}/{len(items)}] "
+            f"{safe_filename(item['name'])}"
+        )
+
+        result = {
+            "id": item["id"],
+            "name": item["name"],
+            "status": None,
+            "drive_url": None,
+            "error": None
+        }
+
+        if not item["url"]:
+            result["status"] = "skipped"
+            result["error"] = (
+                "No exact YouTube video URL selected"
             )
 
-            result = {
-                "id": item["id"],
-                "name": item["name"],
-                "status": None,
-                "drive_url": None,
-                "error": None
-            }
+            results.append(result)
+            continue
 
-            if not item["url"]:
-                result["status"] = "skipped"
-                result["error"] = (
-                    "No exact YouTube video URL selected"
-                )
-                results.append(result)
-                continue
+        folder = None
 
-            folder = None
+        try:
+            existing = drive_existing_file(
+                service,
+                item["id"]
+            )
 
-            try:
-                existing = drive_existing_file(
-                    service,
-                    item["id"]
+            if existing:
+                result["status"] = (
+                    "already_exists"
                 )
 
-                if existing:
-                    result["status"] = "already_exists"
-
-                    result["drive_url"] = existing.get(
+                result["drive_url"] = (
+                    existing.get(
                         "webViewLink",
                         (
                             "https://drive.google.com/file/d/"
                             f"{existing['id']}/view"
                         )
                     )
-
-                else:
-                    folder, file_path, title = (
-                        download_video(item)
-                    )
-
-                    uploaded = upload_to_drive(
-                        service,
-                        item,
-                        file_path,
-                        title
-                    )
-
-                    result["status"] = uploaded["status"]
-                    result["drive_url"] = uploaded["drive_url"]
-
-            except Exception as error:
-                result["status"] = "failed"
-                result["error"] = str(error)[:500]
-
-                print(
-                    f"ERROR: {type(error).__name__}: "
-                    f"{result['error']}"
                 )
 
-            finally:
-                if folder:
-                    shutil.rmtree(
-                        folder,
-                        ignore_errors=True
-                    )
+            else:
+                folder, file_path, title = (
+                    download_video(item)
+                )
 
-            results.append(result)
+                uploaded = upload_to_drive(
+                    service,
+                    item,
+                    file_path,
+                    title
+                )
 
-    finally:
-        report = save_report(results)
+                result["status"] = (
+                    uploaded["status"]
+                )
+
+                result["drive_url"] = (
+                    uploaded["drive_url"]
+                )
+
+        except Exception as error:
+            result["status"] = "failed"
+            result["error"] = str(error)[:500]
+
+            print(
+                "ERROR: "
+                f"{type(error).__name__}: "
+                f"{result['error']}"
+            )
+
+        finally:
+            if folder:
+                shutil.rmtree(
+                    folder,
+                    ignore_errors=True
+                )
+
+        results.append(result)
+
+    report = save_report(results)
 
     if report["failed"] > 0:
         return 1
@@ -816,7 +865,9 @@ if __name__ == "__main__":
 
     except Exception as error:
         print(
-            f"FATAL: {type(error).__name__}: {error}",
+            "FATAL: "
+            f"{type(error).__name__}: {error}",
             file=sys.stderr
         )
+
         sys.exit(1)
