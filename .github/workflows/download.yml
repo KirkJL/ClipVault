@@ -8,12 +8,13 @@ on:
         description: "Download mode"
         required: true
         type: choice
+        default: single
         options:
           - single
           - batch
 
       video_url:
-        description: "Single video URL (single mode)"
+        description: "YouTube video URL"
         required: false
         type: string
 
@@ -50,6 +51,7 @@ jobs:
 
     env:
       PYTHONUNBUFFERED: "1"
+
       DOWNLOAD_MODE: ${{ inputs.mode }}
       VIDEO_URL: ${{ inputs.video_url }}
       MANIFEST_PATH: ${{ inputs.manifest }}
@@ -61,9 +63,11 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
 
     steps:
+      # 1. Download repository files
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Configure Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -71,16 +75,35 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      # 3. Install FFmpeg
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      # 4. Install Deno for yt-dlp YouTube extraction
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # 5. Verify Deno is available
+      - name: Verify JavaScript runtime
+        run: |
+          deno --version
+
+      # 6. Install Python dependencies
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
+      # 7. Verify yt-dlp installation
+      - name: Verify yt-dlp
+        run: |
+          python -m yt_dlp --version
+
+      # 8. Validate configuration
       - name: Validate configuration
         shell: bash
         run: |
@@ -104,10 +127,18 @@ jobs:
             exit 1
           fi
 
+          if [[ "$DOWNLOAD_MODE" != "single" &&
+                "$DOWNLOAD_MODE" != "batch" ]]; then
+            echo "::error::Invalid download mode."
+            exit 1
+          fi
+
+      # 9. Download video and upload to Google Drive
       - name: Download and upload
         run: |
           python downloader.py
 
+      # 10. Preserve execution reports
       - name: Upload execution report
         if: always()
         uses: actions/upload-artifact@v4
@@ -117,6 +148,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # 11. Remove temporary downloaded files
       - name: Cleanup temporary downloads
         if: always()
         run: |
