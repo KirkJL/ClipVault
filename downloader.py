@@ -3,15 +3,15 @@
 """
 ClipVault — YouTube to Google Drive
 
-GitHub Actions downloader with:
-- Single and batch modes
-- yt-dlp mweb client
-- BgUtils HTTP PO-token provider
-- Google OAuth refresh-token authentication
-- Drive duplicate detection
+Features:
+- Single video downloads
+- Batch manifest downloads
+- Authenticated YouTube cookies
+- BgUtils PO-token provider
+- Google Drive OAuth
+- Duplicate detection
 - Resumable uploads
 - JSON execution reports
-- Temporary-file cleanup
 """
 
 import json
@@ -41,6 +41,7 @@ from googleapiclient.http import MediaFileUpload
 # ==================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 REPORT_DIR = BASE_DIR / "reports"
 
@@ -60,17 +61,34 @@ QUALITY = int(
     os.getenv("VIDEO_QUALITY", "1080")
 )
 
-CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
-DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+CLIENT_ID = os.getenv(
+    "GOOGLE_CLIENT_ID", ""
+)
+
+CLIENT_SECRET = os.getenv(
+    "GOOGLE_CLIENT_SECRET", ""
+)
+
+REFRESH_TOKEN = os.getenv(
+    "GOOGLE_REFRESH_TOKEN", ""
+)
+
+DRIVE_FOLDER_ID = os.getenv(
+    "GOOGLE_DRIVE_FOLDER_ID", ""
+)
 
 POT_PROVIDER_URL = os.getenv(
     "CLIPVAULT_POT_PROVIDER_URL",
     "http://127.0.0.1:4416"
 ).rstrip("/")
 
-# Use one YouTube client for this controlled test.
+# NEW: GitHub Actions creates this temporary file
+# from the YOUTUBE_COOKIES repository secret.
+
+YOUTUBE_COOKIE_FILE = os.getenv(
+    "YOUTUBE_COOKIE_FILE", ""
+).strip()
+
 YOUTUBE_PLAYER_CLIENTS = ["mweb"]
 
 SCOPES = [
@@ -86,11 +104,13 @@ ALLOWED_QUALITIES = {
 }
 
 DOWNLOAD_DIR.mkdir(
-    parents=True, exist_ok=True
+    parents=True,
+    exist_ok=True
 )
 
 REPORT_DIR.mkdir(
-    parents=True, exist_ok=True
+    parents=True,
+    exist_ok=True
 )
 
 
@@ -140,13 +160,16 @@ def video_id_from_url(url):
                 ).get("v", [])
 
                 candidate = (
-                    values[0] if values else ""
+                    values[0]
+                    if values
+                    else ""
                 )
 
             elif parsed.path.startswith(
                 ("/shorts/", "/live/")
             ):
                 parts = parsed.path.split("/")
+
                 candidate = (
                     parts[2]
                     if len(parts) > 2
@@ -249,7 +272,8 @@ def load_items():
         )
 
     with manifest.open(
-        "r", encoding="utf-8"
+        "r",
+        encoding="utf-8"
     ) as handle:
         data = json.load(handle)
 
@@ -272,7 +296,8 @@ def load_items():
     items = []
 
     for index, item in enumerate(
-        data, start=1
+        data,
+        start=1
     ):
         if not isinstance(item, dict):
             continue
@@ -302,7 +327,8 @@ def load_items():
             items.append({
                 "id": str(
                     item.get(
-                        "id", f"clip-{index}"
+                        "id",
+                        f"clip-{index}"
                     )
                 ),
                 "name": name,
@@ -365,7 +391,7 @@ def create_drive_service():
 
 
 # ==================================================
-# Duplicate detection
+# Google Drive duplicate detection
 # ==================================================
 
 def drive_existing_file(service, clip_id):
@@ -429,6 +455,70 @@ def check_pot_provider():
 
 
 # ==================================================
+# YouTube cookie configuration
+# ==================================================
+
+def get_cookie_file():
+    """
+    Returns a valid cookie file path when the
+    GitHub Actions workflow has supplied one.
+
+    Does not print cookie contents.
+    """
+
+    if not YOUTUBE_COOKIE_FILE:
+        print(
+            "YouTube cookies: not configured"
+        )
+        return None
+
+    path = Path(
+        YOUTUBE_COOKIE_FILE
+    )
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            "YouTube cookie file was configured "
+            "but does not exist"
+        )
+
+    if path.stat().st_size == 0:
+        raise ValueError(
+            "YouTube cookie file is empty"
+        )
+
+    # Validate the Netscape cookie-file header.
+    # Also accept the HttpOnly variant used by
+    # some cookie exporters.
+
+    with path.open(
+        "r",
+        encoding="utf-8-sig"
+    ) as handle:
+        header = handle.readline().strip()
+
+    if not (
+        header.startswith(
+            "# Netscape HTTP Cookie File"
+        )
+        or header.startswith(
+            "# HTTP Cookie File"
+        )
+    ):
+        raise ValueError(
+            "YouTube cookies must use Netscape "
+            "cookies.txt format"
+        )
+
+    print(
+        "YouTube cookies: loaded from "
+        "GitHub Actions temporary file"
+    )
+
+    return str(path)
+
+
+# ==================================================
 # yt-dlp download
 # ==================================================
 
@@ -445,17 +535,6 @@ def download_video(item):
     output_template = str(
         folder / "%(id)s.%(ext)s"
     )
-
-    # yt-dlp Python API extractor arguments
-    #
-    # youtube:
-    #   Use only mweb for this test.
-    #
-    # youtubepot-bgutilhttp:
-    #   Use the existing local HTTP provider.
-    #
-    # Do not manually supply a PO token.
-    # The plugin requests one as needed.
 
     extractor_args = {
         "youtube": {
@@ -501,16 +580,40 @@ def download_video(item):
     }
 
     try:
+        cookie_file = get_cookie_file()
+
+        if cookie_file:
+            # NEW: Equivalent to:
+            # yt-dlp --cookies cookies.txt
+            #
+            # Keep the existing mweb and
+            # BgUtils configuration unchanged.
+
+            options["cookiefile"] = cookie_file
+
         print("=" * 50)
         print("CLIPVAULT YOUTUBE CONFIGURATION")
         print("=" * 50)
 
         print("Player client: mweb")
+
         print(
             "PO-token provider: "
             + POT_PROVIDER_URL
         )
-        print("Verbose diagnostics: enabled")
+
+        print(
+            "Authentication: "
+            + (
+                "browser cookies"
+                if cookie_file
+                else "anonymous"
+            )
+        )
+
+        print(
+            "Verbose diagnostics: enabled"
+        )
 
         print("=" * 50)
 
@@ -572,7 +675,8 @@ def upload_to_drive(
     clip_id = item["id"]
 
     existing = drive_existing_file(
-        service, clip_id
+        service,
+        clip_id
     )
 
     if existing:
