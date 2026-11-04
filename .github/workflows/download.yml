@@ -1,0 +1,123 @@
+
+name: ClipVault - Download to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Download mode"
+        required: true
+        type: choice
+        options:
+          - single
+          - batch
+
+      video_url:
+        description: "Single video URL (single mode)"
+        required: false
+        type: string
+
+      manifest:
+        description: "Manifest file path (batch mode)"
+        required: false
+        default: "halo-60.json"
+        type: string
+
+      quality:
+        description: "Maximum video resolution"
+        required: true
+        type: choice
+        default: "1080"
+        options:
+          - "720"
+          - "1080"
+          - "1440"
+          - "2160"
+
+jobs:
+  download:
+    name: Download and upload videos
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    permissions:
+      contents: read
+
+    concurrency:
+      group: clipvault-drive-upload
+      cancel-in-progress: false
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      DOWNLOAD_MODE: ${{ inputs.mode }}
+      VIDEO_URL: ${{ inputs.video_url }}
+      MANIFEST_PATH: ${{ inputs.manifest }}
+      VIDEO_QUALITY: ${{ inputs.quality }}
+
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          if [[ -z "$GOOGLE_CLIENT_ID" ||
+                -z "$GOOGLE_CLIENT_SECRET" ||
+                -z "$GOOGLE_REFRESH_TOKEN" ||
+                -z "$GOOGLE_DRIVE_FOLDER_ID" ]]; then
+            echo "::error::Missing Google OAuth secrets."
+            exit 1
+          fi
+
+          if [[ "$DOWNLOAD_MODE" == "single" &&
+                -z "$VIDEO_URL" ]]; then
+            echo "::error::Single mode requires a video URL."
+            exit 1
+          fi
+
+          if [[ "$DOWNLOAD_MODE" == "batch" &&
+                ! -f "$MANIFEST_PATH" ]]; then
+            echo "::error::Manifest file not found."
+            exit 1
+          fi
+
+      - name: Download and upload
+        run: |
+          python downloader.py
+
+      - name: Upload execution report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipvault-report
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup temporary downloads
+        if: always()
+        run: |
+          rm -rf downloads/
