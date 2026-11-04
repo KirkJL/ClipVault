@@ -63,6 +63,10 @@ jobs:
       CLIPVAULT_POT_PROVIDER_URL: http://127.0.0.1:4416
 
     steps:
+      # ============================================
+      # Repository and runtime
+      # ============================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -86,6 +90,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # ============================================
+      # BgUtils PO-token provider
+      # ============================================
+
       - name: Start BgUtils PO-token provider
         run: |
           docker run -d \
@@ -94,7 +102,6 @@ jobs:
             -p 127.0.0.1:4416:4416 \
             brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno
 
-      
       - name: Wait for PO-token provider
         run: |
           python - <<'PY'
@@ -106,21 +113,26 @@ jobs:
 
           for attempt in range(30):
               try:
-                  urllib.request.urlopen(
+                  with urllib.request.urlopen(
                       url,
                       timeout=3
-                  )
-
-                  print(
-                      "PO-token provider is responding"
-                  )
+                  ) as response:
+                      print(
+                          "PO-token provider responding "
+                          f"(HTTP {response.status})"
+                      )
                   break
 
               except urllib.error.HTTPError as error:
-                  # The root URL may return HTTP 400
-                  # because it is not a valid API request.
-                  # An HTTP response still confirms that
-                  # the server is reachable.
+                  # The root URL is not necessarily
+                  # a valid provider API endpoint.
+                  #
+                  # HTTP 400 still confirms that the
+                  # server is reachable.
+                  #
+                  # This is a reachability check,
+                  # not proof of valid token generation.
+
                   print(
                       "PO-token provider reachable "
                       f"(HTTP {error.code})"
@@ -130,43 +142,23 @@ jobs:
               except (
                   urllib.error.URLError,
                   TimeoutError
-              ):
+              ) as error:
                   if attempt == 29:
                       raise RuntimeError(
                           "PO-token provider did not start"
-                      )
+                      ) from error
 
-                  time.sleep(2)
-          PY
-
-        run: |
-          python - <<'PY'
-          import time
-          import urllib.request
-
-          url = "http://127.0.0.1:4416"
-
-          for attempt in range(30):
-              try:
-                  urllib.request.urlopen(
-                      url,
-                      timeout=3
+                  print(
+                      "Waiting for PO-token provider "
+                      f"({attempt + 1}/30)"
                   )
-                  print("Provider is responding")
-                  break
-              except Exception:
-                  if attempt == 29:
-                      raise RuntimeError(
-                          "PO-token provider did not start"
-                      )
+
                   time.sleep(2)
           PY
 
-      # The secret contains the original Netscape cookies.txt.
-      # No Base64 conversion is required.
-      #
-      # Keep the secret out of shell command arguments
-      # and never print its contents.
+      # ============================================
+      # YouTube browser cookies
+      # ============================================
 
       - name: Prepare YouTube cookies
         env:
@@ -186,23 +178,42 @@ jobs:
                   "No YouTube cookie secret configured. "
                   "Continuing without cookies."
               )
+
           else:
               cookie_path = (
                   Path(tempfile.gettempdir())
                   / "clipvault-youtube-cookies.txt"
               )
 
-              # Preserve Netscape cookie formatting.
+              # Preserve the Netscape cookie format.
+              # Do not log or print cookie contents.
+
               cookies = cookies.replace(
                   "\r\n", "\n"
               ).replace("\r", "\n")
 
-              cookie_path.write_text(
-                  cookies,
-                  encoding="utf-8"
+              # Use restrictive permissions from
+              # the moment the file is created.
+
+              fd = os.open(
+                  str(cookie_path),
+                  os.O_WRONLY
+                  | os.O_CREAT
+                  | os.O_TRUNC,
+                  0o600
               )
 
+              with os.fdopen(
+                  fd,
+                  "w",
+                  encoding="utf-8"
+              ) as handle:
+                  handle.write(cookies)
+
               cookie_path.chmod(0o600)
+
+              # Make the path available to
+              # subsequent workflow steps.
 
               with open(
                   os.environ["GITHUB_ENV"],
@@ -218,9 +229,17 @@ jobs:
               )
           PY
 
+      # ============================================
+      # Download and Google Drive upload
+      # ============================================
+
       - name: Download and upload videos
         run: |
           python downloader.py
+
+      # ============================================
+      # Execution report
+      # ============================================
 
       - name: Upload execution report
         if: always()
@@ -230,6 +249,10 @@ jobs:
           path: reports/
           if-no-files-found: ignore
           retention-days: 7
+
+      # ============================================
+      # Cleanup
+      # ============================================
 
       - name: Clean up authentication files
         if: always()
