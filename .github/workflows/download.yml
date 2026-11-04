@@ -63,7 +63,7 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
 
     steps:
-      # 1. Download repository files
+      # 1. Get repository files
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -81,29 +81,87 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      # 4. Install Deno for yt-dlp YouTube extraction
+      # 4. Install Deno for yt-dlp
       - name: Install Deno
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
-      # 5. Verify Deno is available
+      # 5. Verify JavaScript runtime
       - name: Verify JavaScript runtime
         run: |
           deno --version
 
-      # 6. Install Python dependencies
+      # 6. Install yt-dlp, BgUtils plugin and Google APIs
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # 7. Verify yt-dlp installation
+      # 7. Verify yt-dlp and plugin discovery
       - name: Verify yt-dlp
         run: |
           python -m yt_dlp --version
+          python -m yt_dlp --verbose --list-extractors \
+            > /tmp/clipvault-extractors.txt 2>&1
 
-      # 8. Validate configuration
+          if grep -q "bgutil" /tmp/clipvault-extractors.txt; then
+            echo "BgUtils plugin detected."
+          else
+            echo "Checking plugin through Python..."
+            python -m pip show bgutil-ytdlp-pot-provider
+          fi
+
+      # 8. Start the local BgUtils token generator
+      - name: Start PO-token provider
+        shell: bash
+        run: |
+          docker run \
+            --name clipvault-bgutil \
+            --detach \
+            --init \
+            --publish 127.0.0.1:4416:4416 \
+            brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno
+
+      # 9. Wait for the token provider
+      - name: Verify PO-token provider
+        shell: bash
+        run: |
+          echo "Waiting for BgUtils provider..."
+
+          READY=0
+
+          for attempt in {1..30}; do
+            if ! docker inspect \
+              --format '{{.State.Running}}' \
+              clipvault-bgutil 2>/dev/null \
+              | grep -qx true; then
+              echo "Provider container stopped."
+              docker logs clipvault-bgutil
+              exit 1
+            fi
+
+            if curl \
+              --silent \
+              --output /dev/null \
+              --max-time 2 \
+              http://127.0.0.1:4416; then
+              READY=1
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [[ "$READY" != "1" ]]; then
+            echo "::error::BgUtils provider did not respond."
+            docker logs clipvault-bgutil
+            exit 1
+          fi
+
+          echo "BgUtils provider is responding."
+
+      # 10. Validate Google Drive configuration
       - name: Validate configuration
         shell: bash
         run: |
@@ -133,12 +191,12 @@ jobs:
             exit 1
           fi
 
-      # 9. Download video and upload to Google Drive
+      # 11. Download and upload to Google Drive
       - name: Download and upload
         run: |
           python downloader.py
 
-      # 10. Preserve execution reports
+      # 12. Save execution reports
       - name: Upload execution report
         if: always()
         uses: actions/upload-artifact@v4
@@ -148,8 +206,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 11. Remove temporary downloaded files
-      - name: Cleanup temporary downloads
+      # 13. Show provider logs on failure
+      - name: Diagnose PO-token provider
+        if: failure()
+        run: |
+          docker logs --tail 100 clipvault-bgutil || true
+
+      # 14. Stop provider and remove temporary files
+      - name: Cleanup
         if: always()
         run: |
+          docker rm -f clipvault-bgutil || true
           rm -rf downloads/
