@@ -94,7 +94,51 @@ jobs:
             -p 127.0.0.1:4416:4416 \
             brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno
 
+      
       - name: Wait for PO-token provider
+        run: |
+          python - <<'PY'
+          import time
+          import urllib.request
+          import urllib.error
+
+          url = "http://127.0.0.1:4416"
+
+          for attempt in range(30):
+              try:
+                  urllib.request.urlopen(
+                      url,
+                      timeout=3
+                  )
+
+                  print(
+                      "PO-token provider is responding"
+                  )
+                  break
+
+              except urllib.error.HTTPError as error:
+                  # The root URL may return HTTP 400
+                  # because it is not a valid API request.
+                  # An HTTP response still confirms that
+                  # the server is reachable.
+                  print(
+                      "PO-token provider reachable "
+                      f"(HTTP {error.code})"
+                  )
+                  break
+
+              except (
+                  urllib.error.URLError,
+                  TimeoutError
+              ):
+                  if attempt == 29:
+                      raise RuntimeError(
+                          "PO-token provider did not start"
+                      )
+
+                  time.sleep(2)
+          PY
+
         run: |
           python - <<'PY'
           import time
