@@ -1,5 +1,5 @@
 
-name: ClipVault Download
+name: ClipVault - Download to Google Drive
 
 on:
   workflow_dispatch:
@@ -7,53 +7,50 @@ on:
       mode:
         description: Download mode
         required: true
-        default: single
         type: choice
+        default: single
         options:
           - single
           - batch
-
       video_url:
         description: YouTube video URL
         required: false
-        default: ""
         type: string
-
+      manifest:
+        description: Batch manifest file
+        required: false
+        default: halo-60.json
+        type: string
       quality:
-        description: Maximum video quality
+        description: Maximum resolution
         required: true
-        default: "1080"
         type: choice
+        default: "1080"
         options:
           - "720"
           - "1080"
           - "1440"
           - "2160"
 
-      manifest:
-        description: Batch manifest filename
-        required: false
-        default: halo-60.json
-        type: string
-
 permissions:
   contents: read
 
 concurrency:
-  group: clipvault-download
+  group: clipvault-drive-upload
   cancel-in-progress: false
 
 jobs:
   download:
-    name: Download and upload to Drive
+    name: Download and upload videos
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
     env:
+      PYTHONUNBUFFERED: "1"
       DOWNLOAD_MODE: ${{ inputs.mode }}
       VIDEO_URL: ${{ inputs.video_url }}
-      VIDEO_QUALITY: ${{ inputs.quality }}
       MANIFEST_PATH: ${{ inputs.manifest }}
+      VIDEO_QUALITY: ${{ inputs.quality }}
 
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -63,10 +60,6 @@ jobs:
       CLIPVAULT_POT_PROVIDER_URL: http://127.0.0.1:4416
 
     steps:
-      # ============================================
-      # Repository and runtime
-      # ============================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -74,92 +67,108 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Set up Deno
+      - name: Install Deno
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+
+      - name: Verify JavaScript runtime
+        run: deno --version
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # ============================================
-      # BgUtils PO-token provider
-      # ============================================
-
-      - name: Start BgUtils PO-token provider
+      - name: Verify yt-dlp
         run: |
-          docker run -d \
-            --name clipvault-pot-provider \
-            --restart no \
-            -p 127.0.0.1:4416:4416 \
+          python -m yt_dlp --version
+          python -m pip show bgutil-ytdlp-pot-provider
+
+      - name: Start PO-token provider
+        run: |
+          docker run \
+            --name clipvault-bgutil \
+            --detach \
+            --init \
+            --publish 127.0.0.1:4416:4416 \
             brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno
 
-      - name: Wait for PO-token provider
+      - name: Verify PO-token provider
+        shell: bash
         run: |
-          python - <<'PY'
-          import time
-          import urllib.request
-          import urllib.error
+          echo "Waiting for BgUtils provider..."
 
-          url = "http://127.0.0.1:4416"
+          for attempt in {1..30}; do
+            if ! docker inspect \
+              --format '{{.State.Running}}' \
+              clipvault-bgutil 2>/dev/null \
+              | grep -qx true; then
+              echo "::error::Provider container stopped."
+              docker logs clipvault-bgutil
+              exit 1
+            fi
 
-          for attempt in range(30):
-              try:
-                  with urllib.request.urlopen(
-                      url,
-                      timeout=3
-                  ) as response:
-                      print(
-                          "PO-token provider responding "
-                          f"(HTTP {response.status})"
-                      )
-                  break
+            # HTTP 400 from the root endpoint is acceptable
+            # for reachability. It does not prove token generation.
+            STATUS=$(curl -sS -o /dev/null \
+              --max-time 2 \
+              -w '%{http_code}' \
+              http://127.0.0.1:4416 || true)
 
-              except urllib.error.HTTPError as error:
-                  # The root URL is not necessarily
-                  # a valid provider API endpoint.
-                  #
-                  # HTTP 400 still confirms that the
-                  # server is reachable.
-                  #
-                  # This is a reachability check,
-                  # not proof of valid token generation.
+            if [[ "$STATUS" =~ ^[1-5][0-9][0-9]$ ]]; then
+              echo "Provider reachable (HTTP $STATUS)"
+              break
+            fi
 
-                  print(
-                      "PO-token provider reachable "
-                      f"(HTTP {error.code})"
-                  )
-                  break
+            if [[ "$attempt" == "30" ]]; then
+              echo "::error::Provider unreachable."
+              exit 1
+            fi
 
-              except (
-                  urllib.error.URLError,
-                  TimeoutError
-              ) as error:
-                  if attempt == 29:
-                      raise RuntimeError(
-                          "PO-token provider did not start"
-                      ) from error
+            sleep 2
+          done
 
-                  print(
-                      "Waiting for PO-token provider "
-                      f"({attempt + 1}/30)"
-                  )
+      - name: Validate configuration
+        shell: bash
+        run: |
+          if [[ -z "$GOOGLE_CLIENT_ID" ||
+                -z "$GOOGLE_CLIENT_SECRET" ||
+                -z "$GOOGLE_REFRESH_TOKEN" ||
+                -z "$GOOGLE_DRIVE_FOLDER_ID" ]]; then
+            echo "::error::Missing Google OAuth secrets."
+            exit 1
+          fi
 
-                  time.sleep(2)
-          PY
+          if [[ "$DOWNLOAD_MODE" == "single" &&
+                -z "$VIDEO_URL" ]]; then
+            echo "::error::Single mode requires a URL."
+            exit 1
+          fi
 
-      # ============================================
-      # YouTube browser cookies
-      # ============================================
+          if [[ "$DOWNLOAD_MODE" == "batch" &&
+                ! -f "$MANIFEST_PATH" ]]; then
+            echo "::error::Batch manifest not found."
+            exit 1
+          fi
 
+          if [[ "$DOWNLOAD_MODE" != "single" &&
+                "$DOWNLOAD_MODE" != "batch" ]]; then
+            echo "::error::Invalid download mode."
+            exit 1
+          fi
+
+      # NEW: Reconstruct the Netscape cookie file.
+      # Secret content never appears in command arguments
+      # or in the workflow logs.
       - name: Prepare YouTube cookies
         env:
           YOUTUBE_COOKIES_SECRET: ${{ secrets.YOUTUBE_COOKIES }}
@@ -169,77 +178,104 @@ jobs:
           import tempfile
           from pathlib import Path
 
-          cookies = os.environ.get(
-              "YOUTUBE_COOKIES_SECRET", ""
+          raw = os.environ.get("YOUTUBE_COOKIES_SECRET", "")
+
+          if not raw.strip():
+              raise RuntimeError(
+                  "YOUTUBE_COOKIES GitHub secret is missing or empty"
+              )
+
+          raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+          raw = raw.lstrip("\ufeff")
+
+          lines = raw.splitlines()
+
+          # Validate format without displaying secrets.
+          records = []
+          for line in lines:
+              if not line or line.startswith("#"):
+                  if not line.startswith("#HttpOnly_"):
+                      continue
+              parts = line.split("\t")
+              if len(parts) == 7:
+                  records.append(parts)
+
+          youtube_records = [
+              r for r in records
+              if r[0].removeprefix("#HttpOnly_").lstrip(".")
+              in ("youtube.com", "www.youtube.com")
+          ]
+
+          if not youtube_records:
+              raise RuntimeError(
+                  "Cookie export has no YouTube cookie records. "
+                  "Re-export from youtube.com in Firefox."
+              )
+
+          auth_names = {
+              "SID", "HSID", "SSID", "APISID", "SAPISID",
+              "__Secure-1PSID", "__Secure-3PSID",
+              "__Secure-1PAPISID", "__Secure-3PAPISID"
+          }
+
+          found_auth = any(
+              r[5] in auth_names
+              for r in youtube_records
           )
 
-          if not cookies.strip():
-              print(
-                  "No YouTube cookie secret configured. "
-                  "Continuing without cookies."
+          if not found_auth:
+              raise RuntimeError(
+                  "YouTube cookies exist, but no recognised "
+                  "authentication cookies were found. "
+                  "Check that Firefox was signed into YouTube."
               )
 
-          else:
-              cookie_path = (
-                  Path(tempfile.gettempdir())
-                  / "clipvault-youtube-cookies.txt"
-              )
+          fd, path = tempfile.mkstemp(
+              prefix="clipvault-youtube-",
+              suffix=".txt"
+          )
 
-              # Preserve the Netscape cookie format.
-              # Do not log or print cookie contents.
+          try:
+              with os.fdopen(fd, "w", encoding="utf-8") as f:
+                  if not raw.startswith(
+                      ("# Netscape HTTP Cookie File",
+                       "# HTTP Cookie File")
+                  ):
+                      f.write("# Netscape HTTP Cookie File\n")
+                  f.write(raw)
+                  if not raw.endswith("\n"):
+                      f.write("\n")
 
-              cookies = cookies.replace(
-                  "\r\n", "\n"
-              ).replace("\r", "\n")
-
-              # Use restrictive permissions from
-              # the moment the file is created.
-
-              fd = os.open(
-                  str(cookie_path),
-                  os.O_WRONLY
-                  | os.O_CREAT
-                  | os.O_TRUNC,
-                  0o600
-              )
-
-              with os.fdopen(
-                  fd,
-                  "w",
-                  encoding="utf-8"
-              ) as handle:
-                  handle.write(cookies)
-
-              cookie_path.chmod(0o600)
-
-              # Make the path available to
-              # subsequent workflow steps.
+              os.chmod(path, 0o600)
 
               with open(
                   os.environ["GITHUB_ENV"],
                   "a",
                   encoding="utf-8"
-              ) as env_file:
-                  env_file.write(
-                      f"YOUTUBE_COOKIE_FILE={cookie_path}\n"
-                  )
+              ) as env:
+                  env.write(f"YOUTUBE_COOKIE_FILE={path}\n")
 
-              print(
-                  "YouTube cookie file prepared securely."
-              )
+              # Save only the temporary path for cleanup.
+              with open(
+                  os.environ["RUNNER_TEMP"]
+                  + "/clipvault-cookie-path",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+                  f.write(path)
+
+              print("YouTube cookie file created.")
+              print("YouTube authentication cookies detected.")
+              print("Cookie values were not logged.")
+
+          except Exception:
+              Path(path).unlink(missing_ok=True)
+              raise
           PY
 
-      # ============================================
-      # Download and Google Drive upload
-      # ============================================
-
-      - name: Download and upload videos
+      - name: Download and upload
         run: |
           python downloader.py
-
-      # ============================================
-      # Execution report
-      # ============================================
 
       - name: Upload execution report
         if: always()
@@ -250,17 +286,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # ============================================
-      # Cleanup
-      # ============================================
+      - name: Diagnose PO-token provider
+        if: failure()
+        run: |
+          docker logs --tail 50 clipvault-bgutil || true
 
-      - name: Clean up authentication files
+      - name: Cleanup
         if: always()
         run: |
-          if [ -n "${YOUTUBE_COOKIE_FILE:-}" ]; then
-            rm -f -- "$YOUTUBE_COOKIE_FILE"
+          if [[ -f "$RUNNER_TEMP/clipvault-cookie-path" ]]; then
+            COOKIE_PATH=$(cat "$RUNNER_TEMP/clipvault-cookie-path")
+            rm -f -- "$COOKIE_PATH"
+            rm -f -- "$RUNNER_TEMP/clipvault-cookie-path"
           fi
 
-          docker rm -f \
-            clipvault-pot-provider \
-            2>/dev/null || true
+          docker rm -f clipvault-bgutil || true
+          rm -rf downloads/
